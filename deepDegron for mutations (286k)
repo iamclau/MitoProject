@@ -1,0 +1,82 @@
+python - <<'PY'
+import os, warnings
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+warnings.filterwarnings("ignore")
+
+import pandas as pd
+from pathlib import Path
+import deepDegron.degron_pred as dp
+
+REPO     = Path("/workspaces/deepDegron")
+CHUNKS   = Path("input/chunks")
+RESULTS  = Path("input/chunk_results")
+RESULTS.mkdir(exist_ok=True)
+
+pos_model = REPO / "models/nterm/neural_network_pos_specific.pickle"
+bow_model = REPO / "models/nterm/neural_network_bag_of_amino_acids.pickle"
+
+clf1 = dp.load_classifier(str(pos_model))
+clf2 = dp.load_classifier(str(bow_model))
+print("Models loaded.")
+
+chunk_files = sorted(CHUNKS.glob("chunk_*.csv"))
+print(f"Chunks found: {len(chunk_files)}")
+print()
+
+for i, chunk_file in enumerate(chunk_files, 1):
+    out_file = RESULTS / f"{chunk_file.stem}_results.csv"
+
+    if out_file.exists():
+        print(f"[{i}/{len(chunk_files)}] Skipping (already done): {out_file.name}")
+        continue
+
+    print(f"[{i}/{len(chunk_files)}] Scoring: {chunk_file.name} ...", end=" ", flush=True)
+    df = pd.read_csv(chunk_file)
+    rows = []
+
+    for _, row in df.iterrows():
+        seq = str(row["sequence"]).strip()
+
+        if not seq or seq.lower() == "nan" or "U" in seq:
+            rows.append({
+                "sample_id":         row["sample_id"],
+                "gene":              row["gene"],
+                "sequence":          seq,
+                "prob_pos_specific": None,
+                "prob_bag_of_words": None,
+                "delta_prob":        None,
+            })
+            continue
+
+        result = dp.delta_prob_wildtype(
+            tx=None, clf1=clf1, clf2=clf2,
+            model="nterm", seq=seq
+        )
+
+        if result is None or result.empty:
+            rows.append({
+                "sample_id":         row["sample_id"],
+                "gene":              row["gene"],
+                "sequence":          seq,
+                "prob_pos_specific": None,
+                "prob_bag_of_words": None,
+                "delta_prob":        None,
+            })
+        else:
+            rows.append({
+                "sample_id":         row["sample_id"],
+                "gene":              row["gene"],
+                "sequence":          seq,
+                "prob_pos_specific": float(result["prob"].iloc[0]),
+                "prob_bag_of_words": float(result["prob2"].iloc[0]),
+                "delta_prob":        float(result["delta prob"].iloc[0]),
+            })
+
+    out_df = pd.DataFrame(rows)
+    out_df.to_csv(out_file, index=False)
+    print(f"done. ({len(out_df)} rows)")
+
+print()
+print("All chunks scored.")
+print(f"Results saved to: {RESULTS}")
+PY
