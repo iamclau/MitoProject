@@ -1,0 +1,116 @@
+# -*- coding: utf-8 -*-
+"""
+Combine deepDegron chunk results and compute delta scores.
+Run in Spyder with Python 3.9.
+Produces output matching all501_mutant_results_with_deltas.csv format.
+"""
+
+import pandas as pd
+from pathlib import Path
+
+# ─────────────────────────────────────────────────────────────
+# PATHS
+# ─────────────────────────────────────────────────────────────
+BASE         = Path(r"/Users/ian_a_mclauchlan/Documents/MitoProject")
+CHUNKS_DIR   = BASE / "chunk_results"
+LIBRARY_FILE = BASE / "all501_pos1_30_mutant_library_for_deepdegron.csv"
+WT_SCORES    = BASE / "deepDegron_501_wt_scores.csv"
+OUTPUT_FILE  = BASE / "all501_mutant_results_with_deltas_RERUN.csv"
+
+# ─────────────────────────────────────────────────────────────
+# STEP 1: Combine all chunk result files
+# ─────────────────────────────────────────────────────────────
+chunk_files = sorted(CHUNKS_DIR.glob("chunk_*_results.csv"))
+print(f"Chunk result files found: {len(chunk_files)}")
+assert len(chunk_files) == 29, f"Expected 29 chunks, got {len(chunk_files)}"
+
+scored = pd.concat([pd.read_csv(f) for f in chunk_files], ignore_index=True)
+print(f"Total scored rows:        {len(scored)}")
+
+# ─────────────────────────────────────────────────────────────
+# STEP 2: Load original library (provides all metadata columns)
+# ─────────────────────────────────────────────────────────────
+library = pd.read_csv(LIBRARY_FILE)
+print(f"Library rows:             {len(library)}")
+
+meta_cols = ['sample_id', 'gene', 'protein_id', 'position',
+             'wt_aa', 'mut_aa', 'mutation', 'sequence', 'scan_window']
+library_meta = library[meta_cols].copy()
+
+# ─────────────────────────────────────────────────────────────
+# STEP 3: Merge scored results onto library metadata
+# ─────────────────────────────────────────────────────────────
+df = library_meta.merge(
+    scored[['sample_id', 'gene', 'sequence',
+            'prob_pos_specific', 'prob_bag_of_words', 'delta_prob']],
+    on=['sample_id', 'gene', 'sequence'],
+    how='left'
+)
+print(f"Merged rows:              {len(df)}")
+print(f"Null prob_pos_specific:   {df['prob_pos_specific'].isna().sum()}")
+
+# ─────────────────────────────────────────────────────────────
+# STEP 4: Merge corrected WT baseline scores
+# ─────────────────────────────────────────────────────────────
+wt = pd.read_csv(WT_SCORES)[['gene', 'prob_pos_specific',
+                              'prob_bag_of_words', 'delta_prob']].copy()
+wt = wt.rename(columns={
+    'prob_pos_specific': 'wt_prob_pos_specific',
+    'prob_bag_of_words': 'wt_prob_bag_of_words',
+    'delta_prob':        'wt_delta_prob',
+})
+print(f"WT baseline rows:         {len(wt)}")
+
+df = df.merge(wt, on='gene', how='left')
+print(f"Null wt_prob_pos_specific: {df['wt_prob_pos_specific'].isna().sum()}")
+
+# ─────────────────────────────────────────────────────────────
+# STEP 5: Compute delta columns
+# ─────────────────────────────────────────────────────────────
+df['delta_specific']   = df['prob_pos_specific'] - df['wt_prob_pos_specific']
+df['delta_bow']        = df['prob_bag_of_words'] - df['wt_prob_bag_of_words']
+df['delta_delta_prob'] = df['delta_prob']        - df['wt_delta_prob']
+
+# WT rows: deltas are 0 by definition
+wt_mask = df['mutation'] == 'WT'
+df.loc[wt_mask, 'delta_specific']   = 0.0
+df.loc[wt_mask, 'delta_bow']        = 0.0
+df.loc[wt_mask, 'delta_delta_prob'] = 0.0
+
+# ─────────────────────────────────────────────────────────────
+# STEP 6: Enforce column order to match original format exactly
+# ─────────────────────────────────────────────────────────────
+final_cols = [
+    'sample_id', 'gene', 'protein_id', 'position',
+    'wt_aa', 'mut_aa', 'mutation', 'sequence', 'scan_window',
+    'prob_pos_specific', 'prob_bag_of_words', 'delta_prob',
+    'wt_prob_pos_specific', 'wt_prob_bag_of_words', 'wt_delta_prob',
+    'delta_specific', 'delta_bow', 'delta_delta_prob'
+]
+df = df[final_cols]
+
+# ─────────────────────────────────────────────────────────────
+# STEP 7: Sanity checks
+# ─────────────────────────────────────────────────────────────
+print()
+print("=== SANITY CHECKS ===")
+print(f"Total rows:                {len(df)}  (expect 286071)")
+print(f"Unique genes:              {df['gene'].nunique()}  (expect 501)")
+print(f"WT rows:                   {wt_mask.sum()}  (expect 501)")
+print(f"Mutant rows:               {(~wt_mask).sum()}  (expect 285570)")
+print(f"Null values:               {df.isnull().sum().sum()}")
+print(f"Pos6 delta range:          {df[df['position']==6]['delta_specific'].agg(['min','max','mean']).round(4).to_dict()}")
+print(f"Columns match target:      {list(df.columns) == final_cols}")
+print()
+print("Sample WT row:")
+print(df[df['mutation']=='WT'].head(2).to_string())
+print()
+print("Sample mutant rows:")
+print(df[df['mutation']!='WT'].head(3).to_string())
+
+# ─────────────────────────────────────────────────────────────
+# STEP 8: Save
+# ─────────────────────────────────────────────────────────────
+df.to_csv(OUTPUT_FILE, index=False)
+print()
+print(f"Saved: {OUTPUT_FILE}")
